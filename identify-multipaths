@@ -1,0 +1,104 @@
+#!/bin/bash
+#
+# identify-multipaths
+#
+# This script is used to identify what block devices on your system are
+# likely devices with multiple paths for use in setting up and configuring
+# device-mapper-multipath. 
+#
+# Authors:
+# Adam Miller <maxamillion@fedoraproject.org>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+### Declare global variables
+
+# These will have to share indexes because we have to support bash 3.x
+# for RHEL5.x .... so index book keeping will be required.
+#   Example: ${wwids[1]} will store the wwid of ${dev_names[1]}
+# 
+declare -a wwids            # wwwids
+declare -a path_count       # number of paths found to this wwid
+declare -a dev_names             # device names
+
+declare -i __index__        # shared index - keep track of this!
+__index__=0                 # place a base line for the index
+
+declare -i __found_status__ # "bit" flip for status of found iteration
+__found_status__=0
+
+# Read all device names from /proc/partitions but don't track dm- devices
+while read line
+do
+    # Device name 
+    dev_name=$(printf "%s" "$line" | awk '{ print $4 }')
+
+    # Omit device mapper dm devices
+    ##FIXME - this is wrong, need to fix with a more clever regex
+    if [[ $dev_name == sd* ]]; then
+
+        
+        # Check for the RHEL version in order to support proper command syntax
+        if grep '5.' /etc/redhat-release &> /dev/null; then 
+            dev_wwid=$(scsi_id -gus /block/$dev_name)
+        elif grep '6.' /etc/redhat-release &> /dev/null; then
+            dev_wwid=$(scsi_id --whitelisted --page=0x83 --device=/dev/$dev_name)
+        fi
+
+        # Check for a wwid, partitions generally don't have one
+        if [[ -n $dev_wwid ]]; then
+
+            # Check for the existence of the wwid 
+            ## This is ugly and slow, but its easy and runtime is short
+            for i in ${!wwids[@]}
+            do
+                # If this already exists, increment the path count
+                if [[ $dev_wwid == "${wwids[$i]}" ]]; then
+                    path_count[$i]+=1
+                    dev_names[$i]="${dev_names[$i]} $dev_name"
+
+                    # Set found status and don't increment index or create 
+                    # another entry in wwids array
+                    __found_status__=1
+                fi
+            done
+
+            if [[ $__found_status__ -eq 0 ]]; then
+                dev_names[${__index__}]=$dev_name
+                wwids[${__index__}]=$dev_wwid
+                path_count[${__index__}]+=1
+                __index__+=1
+            fi
+                
+            __found_status__=0    
+
+        fi
+    fi
+
+done < /proc/partitions
+
+
+# Output our stuff!
+
+printf "The following potential multipaths were found:\n\n"
+
+for i in ${!path_count[@]}
+do
+    if [[ ${path_count[$i]} -gt 1 ]]; then
+        # FIXME - dirty hardcoded 30 column buffer, but should be good ... maybe
+        printf "${dev_names[$i]} = ${wwids[$i]}\n"
+    fi
+done
+
